@@ -182,3 +182,238 @@ sctype_scores = cL_resutls %>% group_by(cluster) %>% top_n(n = 1, wt = scores)
 sctype_scores$type[as.numeric(as.character(sctype_scores$scores)) < sctype_scores$ncells/4] = "Unknown"
 
 
+
+####### Slingshot : trajectory 
+#ref: https://bioconductor.org/packages/devel/bioc/vignettes/slingshot/inst/doc/vignette.html
+library(SingleCellExperiment)
+library(slingshot)
+
+
+brain_sce <- as.SingleCellExperiment(brain)
+
+#gene filter
+geneFilter <- apply(assays(brain_sce)$counts,1,function(x){
+    sum(x >= 3) >= 10
+})
+brain_sce <- brain_sce[geneFilter, ]
+
+#normalization
+FQnorm <- function(counts){
+    rk <- apply(counts,2,rank,ties.method='min')
+    counts.sort <- apply(counts,2,sort)
+    refdist <- apply(counts.sort,1,median)
+    norm <- apply(rk,2,function(r){ refdist[r] })
+    rownames(norm) <- rownames(counts)
+    return(norm)
+}
+
+assays(brain_sce)$norm <- FQnorm(assays(brain_sce)$counts)
+
+#dimensional reduction
+pca <- prcomp(t(log1p(assays(brain_sce)$norm)), scale. = FALSE)
+rd1 <- pca$x[,1:2]
+plot(rd1, col = rgb(0,0,0,.5), pch=16, asp = 1)
+
+library(uwot)
+
+rd2 <- uwot::umap(t(log1p(assays(brain_sce)$norm)))
+colnames(rd2) <- c('UMAP1', 'UMAP2')
+plot(rd2, col = rgb(0,0,0,.5), pch=16, asp = 1)
+
+
+reducedDims(brain_sce) <- SimpleList(PCA = rd1, UMAP = rd2)
+
+#clustering cells
+library(mclust, quietly = TRUE)
+cl1 <- Mclust(rd1)$classification
+colData(brain_sce)$GMM <- cl1
+
+library(RColorBrewer)
+plot(rd1, col = brewer.pal(9,"Set1")[cl1], pch=16, asp = 1)
+
+
+cl2 <- kmeans(rd1, centers = 4)$cluster
+colData(sce)$kmeans <- cl2
+
+plot(rd1, col = brewer.pal(9,"Set1")[cl2], pch=16, asp = 1)
+
+brain_sce <- slingshot(brain_sce, clusterLabels = 'GMM', reducedDim = 'PCA')
+
+library(grDevices)
+colors <- colorRampPalette(brewer.pal(11,'Spectral')[-6])(100)
+plotcol <- colors[cut(brain_sce$slingPseudotime_1, breaks=100)]
+
+plot(reducedDims(brain_sce)$PCA, col = plotcol, pch=16, asp = 1)
+lines(SlingshotDataSet(brain_sce), lwd=2, col='black')
+
+plot(reducedDims(brain_sce)$PCA, col = brewer.pal(9,'Set1')[brain_sce$GMM], pch=16, asp = 1)
+lines(SlingshotDataSet(brain_sce), lwd=2, type = 'lineages', col = 'black')
+
+
+######## trajectory : tradeseq #########
+
+library(tradeSeq)
+library(RColorBrewer)
+library(SingleCellExperiment)
+library(slingshot)
+
+seu<-brain
+
+## sds = crv
+crv <- slingshot(Embeddings(seu, "umap"), clusterLabels = seu$seurat_clusters, start.clus = 4, stretch = 0)
+brain.sce <- as.SingleCellExperiment(brain)
+brain.counts<-GetAssayData(object = brain, slot = "counts")
+brain.crv<-readRDS("brain_crv.rds")
+
+
+cell_pal <- function(cell_vars, pal_fun,...) {
+  if (is.numeric(cell_vars)) {
+    pal <- pal_fun(100, ...)
+    return(pal[cut(cell_vars, breaks = 100)])
+  } else {
+    categories <- sort(unique(cell_vars))
+    pal <- setNames(pal_fun(length(categories), ...), categories)
+    return(pal[cell_vars])
+  }
+}
+
+
+r_col=pal_d3("category10", alpha = 0.7)(10)
+
+library(scales)
+cell_colors <- cell_pal(Idents(seu), pal_d3("category10", alpha = 0.7))
+cell_colors_clust <- cell_pal(seu$seurat_clusters, hue_pal())
+
+plot(reducedDim(brain.crv), col = cell_colors, pch = 20, cex = 1)
+lines(brain.crv, lwd = 2, type = 'lineages', col = 'black')
+
+pseudotime <- slingPseudotime(brain.crv, na = FALSE)
+cellWeights <- slingCurveWeights(brain.crv)
+sce <- fitGAM(counts = brain.counts, pseudotime = pseudotime, cellWeights = cellWeights,
+                 nknots = 6, verbose = FALSE)
+table(rowData(sce)$tradeSeq$converged)
+
+assoRes <- associationTest(sce)
+head(assoRes)
+saveRDS(assoRes, file = "assoRes.rds")
+
+startRes <- startVsEndTest(sce)
+saveRDS(startRes, file = "startRes.rds")
+
+assoRes<-readRDS("assoRes.rds")
+startRes<-readRDS("startRes.rds")
+
+oStart <- order(startRes$waldStat, decreasing = TRUE)
+sigGeneStart <- names(sce)[oStart[3]]
+plotSmoothers(sce, brain.counts, gene = sigGeneStart)+
+        theme(axis.text=element_text(size=20),
+              axis.text.x = element_text(size = 20),
+              axis.title=element_text(size=20,face="bold"),
+              legend.title=element_text(size=20,face="bold"),
+              legend.text=element_text(size=20,face="bold"),
+              plot.margin = margin(2, 2, 2, 3, "cm")) 
+
+########### cell cell communication #########
+#ref: https://htmlpreview.github.io/?https://github.com/sqjin/CellChat/blob/master/tutorial/Comparison_analysis_of_multiple_datasets.html
+library(CellChat)
+library(patchwork)
+library(Future)
+options(stringsAsFactors = FALSE)
+
+#seurat.data<-brain
+#seurat.data <- subset(brain, subset = orig.ident == "Aged")
+seurat.data <- subset(brain, subset = orig.ident == "Young")
+data.input <- GetAssayData(seurat.data, , slot = "counts") # normalized data matrix
+labels <- Idents(seurat.data)
+meta <- data.frame(group = labels, row.names = names(labels)) # create a dataframe of the cell labels
+
+cellchat <- createCellChat(object = data.input, meta = meta, group.by = "group")
+
+#CellChatDB <- CellChatDB.human # use CellChatDB.mouse if running on mouse data
+CellChatDB <- CellChatDB.mouse # use CellChatDB.mouse if running on mouse data
+
+#showDatabaseCategory(CellChatDB)
+
+# Show the structure of the database
+dplyr::glimpse(CellChatDB$interaction)
+
+# use a subset of CellChatDB for cell-cell communication analysis
+CellChatDB.use <- subsetDB(CellChatDB, search = "Secreted Signaling") # use Secreted Signaling
+# use all CellChatDB for cell-cell communication analysis
+# CellChatDB.use <- CellChatDB # simply use the default CellChatDB
+
+# set the used database in the object
+cellchat@DB <- CellChatDB.use
+
+# subset the expression data of signaling genes for saving computation cost
+cellchat <- subsetData(cellchat) # This step is necessary even if using the whole database
+future::plan("multiprocess", workers = 4) # do parallel
+cellchat <- identifyOverExpressedGenes(cellchat)
+cellchat <- identifyOverExpressedInteractions(cellchat)
+### project gene expression data onto PPI network (optional)
+#cellchat <- projectData(cellchat, PPI.human)
+cellchat <- projectData(cellchat, PPI.mouse)
+
+
+### long time consume
+cellchat <- computeCommunProb(cellchat)
+# Filter out the cell-cell communication if there are only few number of cells in certain cell groups
+cellchat <- filterCommunication(cellchat, min.cells = 10)
+
+cellchat <- computeCommunProbPathway(cellchat)
+cellchat <- aggregateNet(cellchat)
+groupSize <- as.numeric(table(cellchat@idents))
+
+
+####signaling role identification
+# Compute the network centrality scores
+cellchat <- netAnalysis_computeCentrality(cellchat, slot.name = "netP") # the slot 'netP' means the inferred intercellular communication network of signaling pathways
+cellchat<-rankNetPairwise(cellchat)
+
+
+#--------------------------------------------------------------------------------------------------------------
+###Perform NicheNet analysis starting from a Seurat object
+#--------------------------------------------------------------------------------------------------------------
+library(nichenetr)
+library(Seurat)
+library(tidyverse)
+library(readr)
+library(ggh4x)
+library(cowplot)
+
+ligand_target_matrix = readRDS("/exdisk/sda1/database/nichenet/ligand_target_matrix.rds")
+lr_network = readRDS("/exdisk/sda1/database/nichenet/lr_network.rds")
+weighted_networks = readRDS("/exdisk/sda1/database/nichenet/weighted_networks.rds")
+
+nichenet_output.old = nichenet_seuratobj_aggregate(seurat_obj = brain, 
+  receiver = c("MB","HPF", "isoCTX", "PIR", "NF", "VEN","TH"),
+  condition_colname = "orig.ident", condition_oi = "Old", condition_reference = "Young", 
+  sender = "all", 
+  ligand_target_matrix = ligand_target_matrix, 
+  lr_network = lr_network, 
+  weighted_networks = weighted_networks, 
+  organism = "mouse")
+
+nichenet_output.young = nichenet_seuratobj_aggregate(seurat_obj = brain, 
+  receiver = c("MB","HPF", "isoCTX", "PIR", "NF", "VEN","TH"),
+  condition_colname = "orig.ident", condition_oi = "Young", condition_reference = "Old", 
+  sender = "all", 
+  ligand_target_matrix = ligand_target_matrix, 
+  lr_network = lr_network, 
+  weighted_networks = weighted_networks, 
+  organism = "mouse")
+
+nichenet_output.old$ligand_expression_dotplot + 
+theme(axis.text=element_text(size=20),
+              axis.text.x = element_text(size = 20),
+              axis.title=element_text(size=20,face="bold"),
+              legend.title=element_text(size=20,face="bold"),
+              legend.text=element_text(size=20,face="bold")) 
+
+nichenet_output.young$ligand_expression_dotplot + 
+theme(axis.text=element_text(size=20),
+              axis.text.x = element_text(size = 20),
+              axis.title=element_text(size=20,face="bold"),
+              legend.title=element_text(size=20,face="bold"),
+              legend.text=element_text(size=20,face="bold")) 
+
