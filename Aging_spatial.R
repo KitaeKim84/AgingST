@@ -1,5 +1,4 @@
 ###After preprocessing with space ranger 
-
 wt_old <- Load10X_Spatial("/data2/Visium/20230322_visium/preprocessing/WT_old/outs/",
                         filename="filtered_feature_bc_matrix.h5",slice="s3")
 wt_old<-RenameCells(object=wt_old,new.names=paste(names(Idents(wt_old)),"-S",3,sep=""))
@@ -8,38 +7,24 @@ wt_young <- Load10X_Spatial("/data2/Visium/20230322_visium/preprocessing/WT_youn
                         filename="filtered_feature_bc_matrix.h5",slice="s4")
 wt_young<-RenameCells(object=wt_young,new.names=paste(names(Idents(wt_young)),"-S",4,sep=""))
 
-
-brain.wt.merge <- merge( wt_old, wt_young)
-brain<-brain.wt.merge
+brain<-merge( wt_old, wt_young)
 dim(brain)
-
 
 # The [[ operator can add columns to object metadata. This is a great place to stash QC stats
 brain[["percent.mt"]] <- PercentageFeatureSet(brain, pattern = "^MT-")
-#brain <- subset(brain, subset = nFeature_Spatial > 200 & nFeature_Spatial < 2500 & percent.mt < 5)
-
+brain <- subset(brain, subset = nFeature_Spatial > 200 & nFeature_Spatial < 2500 & percent.mt < 5)
 brain <- NormalizeData(brain, normalization.method = "LogNormalize", scale.factor = 10000)
-
 brain <- FindVariableFeatures(brain, selection.method = "vst", nfeatures = 2000)
-
 all.genes <- rownames(brain)
 brain <- ScaleData(brain, features = all.genes)
-
 brain <- RunPCA(brain, features = VariableFeatures(object = brain))
-
 brain <- JackStraw(brain, num.replicate = 100)
 brain <- ScoreJackStraw(brain, dims = 1:20)
-
 brain <- FindNeighbors(brain, dims = 1:10)
 brain <- FindClusters(brain, resolution = 0.5)
-
 brain <- RunUMAP(brain, dims = 1:10)
 brain <- RunTSNE(brain, dims = 1:10)
-
-
-names(brain@images)<-c("Aged","Young")
-saveRDS(brain, file = "brain_wt.rds")
-
+names(brain@images)<-c("Old","Young")
 
 pal_d3("category10", alpha = 0.7)(10)
 
@@ -58,16 +43,6 @@ DimPlot(brain, reduction = "umap", label = F, pt.size=1.5,label.size=8,cols=pal_
         axis.title=element_text(size=20,face="bold"),
         plot.margin = margin(2, 2, 2, 3, "cm")) 
 
-SpatialDimPlot(brain, cells.highlight = CellsByIdentities(object = brain, idents = c(2, 1, 4, 3,
-    5, 8)), facet.highlight = TRUE, ncol = 4)
-
-#specific image selection (combine = FALSE)
-SpatialDimPlot(brain, cells.highlight = CellsByIdentities(object = brain), 
-                facet.highlight = TRUE, ncol = 5, images="Aged",cols.highlight = c("#DE2D26","#00000000"))    
-
-options(browser="google-chrome")
-
-
 ##### cluster markers #####
 total_exp<-as.matrix(GetAssayData(brain))
 org.markers <- FindAllMarkers(object = brain, only.pos = TRUE, min.pct = 0.25, thresh.use = 0.25)
@@ -75,17 +50,13 @@ org.markers <- FindAllMarkers(object = brain, only.pos = TRUE, min.pct = 0.25, t
 org.markers$gene<-rownames(org.markers)
 summary(as.factor(org.markers$cluster))
 
-
-b<-apply(total_exp,1,sum)
-not_zero_gene<-names(b[b!=0])
+sum.exp<-apply(total_exp,1,sum)
+not_zero_gene<-names(sum.exp[sum.exp!=0])
 markers <- org.markers[ org.markers$p_val_adj < 0.05 & org.markers$avg_log2FC>log2(1.5), ]
-
 
 markers<-markers%>%filter(gene%in%intersect(not_zero_gene, markers$gene))
 markers<-markers[!grepl("^.*Rik+|^Gm[0-9]+$|^AC[0-9]+.[0-9]$|^BC[0-9]+|ps-|mt-|-ps",markers$gene), ]
 summary(as.factor(markers$cluster))
-
-markers<-read.table(file="fdr0.05_fc1.5_reging_markers_all.txt", header=T, sep="\t")
 
 top.markers <-  markers %>%
   group_by(cluster) %>%
@@ -144,44 +115,6 @@ ggplot() + theme_bw() +
         axis.title=element_text(size=30,face="bold"),
         plot.margin = margin(2, 2, 2, 3, "cm")) +
   labs(x="Clusters", y="Proportion (%, in each sample)") 
-
-
-#####sc type
-# load libraries
-lapply(c("dplyr","Seurat","HGNChelper"), library, character.only = T)
-
-# load gene set preparation function
-source("https://raw.githubusercontent.com/IanevskiAleksandr/sc-type/master/R/gene_sets_prepare.R")
-# load cell type annotation function
-source("https://raw.githubusercontent.com/IanevskiAleksandr/sc-type/master/R/sctype_score_.R")
-
-# DB file
-db_ = "https://raw.githubusercontent.com/IanevskiAleksandr/sc-type/master/ScTypeDB_full.xlsx";
-tissue = "Brain" # e.g. Immune system,Pancreas,Liver,Eye,Kidney,Brain,Lung,Adrenal,Heart,Intestine,Muscle,Placenta,Spleen,Stomach,Thymus 
-
-# prepare gene sets
-gs_list = gene_sets_prepare(db_, tissue)
-
-
-# get cell-type by cell matrix
-es.max = sctype_score(scRNAseqData = brain[["Spatial"]]@scale.data, scaled = TRUE, 
-                      gs = gs_list$gs_positive, gs2 = gs_list$gs_negative) 
-
-# NOTE: scRNAseqData parameter should correspond to your input scRNA-seq matrix. 
-# In case Seurat is used, it is either pbmc[["RNA"]]@scale.data (default), pbmc[["SCT"]]@scale.data, in case sctransform is used for normalization,
-# or pbmc[["integrated"]]@scale.data, in case a joint analysis of multiple single-cell datasets is performed.
-
-# merge by cluster
-cL_resutls = do.call("rbind", lapply(unique(brain@meta.data$seurat_clusters), function(cl){
-    es.max.cl = sort(rowSums(es.max[ ,rownames(brain@meta.data[brain@meta.data$seurat_clusters==cl, ])]), decreasing = !0)
-    head(data.frame(cluster = cl, type = names(es.max.cl), scores = es.max.cl, ncells = sum(brain@meta.data$seurat_clusters==cl)), 10)
-}))
-sctype_scores = cL_resutls %>% group_by(cluster) %>% top_n(n = 1, wt = scores)  
-
-# set low-confident (low ScType score) clusters to "unknown"
-sctype_scores$type[as.numeric(as.character(sctype_scores$scores)) < sctype_scores$ncells/4] = "Unknown"
-
-
 
 ####### Slingshot : trajectory 
 #ref: https://bioconductor.org/packages/devel/bioc/vignettes/slingshot/inst/doc/vignette.html
@@ -251,7 +184,6 @@ lines(SlingshotDataSet(brain_sce), lwd=2, type = 'lineages', col = 'black')
 
 
 ######## trajectory : tradeseq #########
-
 library(tradeSeq)
 library(RColorBrewer)
 library(SingleCellExperiment)
@@ -295,10 +227,8 @@ table(rowData(sce)$tradeSeq$converged)
 
 assoRes <- associationTest(sce)
 head(assoRes)
-saveRDS(assoRes, file = "assoRes.rds")
 
 startRes <- startVsEndTest(sce)
-saveRDS(startRes, file = "startRes.rds")
 
 assoRes<-readRDS("assoRes.rds")
 startRes<-readRDS("startRes.rds")
@@ -320,19 +250,15 @@ library(patchwork)
 library(Future)
 options(stringsAsFactors = FALSE)
 
-#seurat.data<-brain
 #seurat.data <- subset(brain, subset = orig.ident == "Aged")
 seurat.data <- subset(brain, subset = orig.ident == "Young")
 data.input <- GetAssayData(seurat.data, , slot = "counts") # normalized data matrix
 labels <- Idents(seurat.data)
 meta <- data.frame(group = labels, row.names = names(labels)) # create a dataframe of the cell labels
-
 cellchat <- createCellChat(object = data.input, meta = meta, group.by = "group")
 
 #CellChatDB <- CellChatDB.human # use CellChatDB.mouse if running on mouse data
 CellChatDB <- CellChatDB.mouse # use CellChatDB.mouse if running on mouse data
-
-#showDatabaseCategory(CellChatDB)
 
 # Show the structure of the database
 dplyr::glimpse(CellChatDB$interaction)
@@ -354,21 +280,18 @@ cellchat <- identifyOverExpressedInteractions(cellchat)
 #cellchat <- projectData(cellchat, PPI.human)
 cellchat <- projectData(cellchat, PPI.mouse)
 
-
 ### long time consume
 cellchat <- computeCommunProb(cellchat)
 # Filter out the cell-cell communication if there are only few number of cells in certain cell groups
 cellchat <- filterCommunication(cellchat, min.cells = 10)
-
 cellchat <- computeCommunProbPathway(cellchat)
 cellchat <- aggregateNet(cellchat)
 groupSize <- as.numeric(table(cellchat@idents))
 
-
 ####signaling role identification
 # Compute the network centrality scores
 cellchat <- netAnalysis_computeCentrality(cellchat, slot.name = "netP") # the slot 'netP' means the inferred intercellular communication network of signaling pathways
-cellchat<-rankNetPairwise(cellchat)
+cellchat <- rankNetPairwise(cellchat)
 
 
 #--------------------------------------------------------------------------------------------------------------
